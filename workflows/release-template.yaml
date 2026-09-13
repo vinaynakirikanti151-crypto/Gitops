@@ -1,0 +1,63 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+
+metadata:
+  name: jupyterhub-uat-release
+  namespace: argo
+
+spec:
+
+  serviceAccountName: workflow-executor
+
+  entrypoint: show-release-details
+
+  arguments:
+    parameters:
+
+      - name: application
+        value: jupyterhub
+
+      - name: environment
+        value: uat
+
+      - name: imageTag
+        value: "1.29"
+
+      - name: releaseBranch
+        value: release-uat
+
+      - name: overlayPath
+        value: platform/overlays/uat/jupyterhub
+
+      - name: releaseRepo
+        value: https://github.com/vinaynakirikanti151-crypto/Gitops.git
+
+  templates:
+
+    - name: show-release-details
+
+      container:
+
+        image: alpine:3.20
+
+        command:
+          - sh
+          - -c
+
+        args:
+          - |
+            echo "--------------------------------------"
+            echo " UAT RELEASE WORKFLOW"
+            echo "--------------------------------------"
+
+            echo "Application     : {{workflow.parameters.application}}"
+            echo "Environment     : {{workflow.parameters.environment}}"
+            echo "Image Tag       : {{workflow.parameters.imageTag}}"
+            echo "Release Branch  : {{workflow.parameters.releaseBranch}}"
+            echo "Release Repo    : {{workflow.parameters.releaseRepo}}"
+            echo "Overlay Path    : {{workflow.parameters.overlayPath}}"
+
+            echo "--------------------------------------"
+
+            echo "This is only a validation workflow."
+            echo "No Git changes will be made today."
