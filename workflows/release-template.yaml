@@ -6,14 +6,12 @@ metadata:
   namespace: argo
 
 spec:
-
   serviceAccountName: workflow-executor
 
-  entrypoint: show-release-details
+  entrypoint: promote-release
 
   arguments:
     parameters:
-
       - name: application
         value: jupyterhub
 
@@ -21,7 +19,7 @@ spec:
         value: uat
 
       - name: imageTag
-        value: "1.29"
+        value: "1.30"
 
       - name: releaseBranch
         value: release-uat
@@ -32,32 +30,287 @@ spec:
       - name: releaseRepo
         value: https://github.com/vinaynakirikanti151-crypto/Gitops.git
 
-  templates:
+      - name: repoOwner
+        value: vinaynakirikanti151-crypto
 
-    - name: show-release-details
+      - name: repoName
+        value: Gitops
+
+  templates:
+    - name: promote-release
 
       container:
-
         image: alpine:3.20
 
         command:
           - sh
           - -c
 
+        env:
+          - name: GITHUB_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: github-credentials
+                key: username
+
+          - name: GITHUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: github-credentials
+                key: token
+
         args:
           - |
-            echo "--------------------------------------"
-            echo " UAT RELEASE WORKFLOW"
-            echo "--------------------------------------"
+            set -eu
 
-            echo "Application     : {{workflow.parameters.application}}"
-            echo "Environment     : {{workflow.parameters.environment}}"
-            echo "Image Tag       : {{workflow.parameters.imageTag}}"
-            echo "Release Branch  : {{workflow.parameters.releaseBranch}}"
-            echo "Release Repo    : {{workflow.parameters.releaseRepo}}"
-            echo "Overlay Path    : {{workflow.parameters.overlayPath}}"
+            echo "======================================"
+            echo " UAT RELEASE PROMOTION WORKFLOW"
+            echo "======================================"
 
-            echo "--------------------------------------"
+            APPLICATION="{{workflow.parameters.application}}"
+            ENVIRONMENT="{{workflow.parameters.environment}}"
+            IMAGE_TAG="{{workflow.parameters.imageTag}}"
+            RELEASE_BRANCH="{{workflow.parameters.releaseBranch}}"
+            RELEASE_REPO="{{workflow.parameters.releaseRepo}}"
+            OVERLAY_PATH="{{workflow.parameters.overlayPath}}"
+            REPO_OWNER="{{workflow.parameters.repoOwner}}"
+            REPO_NAME="{{workflow.parameters.repoName}}"
 
-            echo "This is only a validation workflow."
-            echo "No Git changes will be made today."
+            PROMOTION_BRANCH="promote/${APPLICATION}-${IMAGE_TAG}-{{workflow.uid}}"
+
+            echo ""
+            echo "Application      : ${APPLICATION}"
+            echo "Environment      : ${ENVIRONMENT}"
+            echo "Image Tag        : ${IMAGE_TAG}"
+            echo "Release Branch   : ${RELEASE_BRANCH}"
+            echo "Release Repo     : ${RELEASE_REPO}"
+            echo "Overlay Path     : ${OVERLAY_PATH}"
+            echo "Promotion Branch : ${PROMOTION_BRANCH}"
+
+            echo ""
+            echo "======================================"
+            echo " INSTALLING REQUIRED TOOLS"
+            echo "======================================"
+
+            apk add --no-cache git curl jq
+
+            echo ""
+            echo "======================================"
+            echo " CONFIGURING GITHUB AUTHENTICATION"
+            echo "======================================"
+
+            cat > /tmp/git-askpass.sh <<'EOF'
+            #!/bin/sh
+
+            case "$1" in
+              *Username*)
+                echo "$GITHUB_USERNAME"
+                ;;
+              *Password*)
+                echo "$GITHUB_TOKEN"
+                ;;
+            esac
+            EOF
+
+            chmod 700 /tmp/git-askpass.sh
+
+            export GIT_ASKPASS=/tmp/git-askpass.sh
+            export GIT_TERMINAL_PROMPT=0
+
+            echo ""
+            echo "======================================"
+            echo " CLONING RELEASE REPOSITORY"
+            echo "======================================"
+
+            git clone \
+              --branch "${RELEASE_BRANCH}" \
+              "${RELEASE_REPO}" \
+              /tmp/release-repo
+
+            cd /tmp/release-repo
+
+            echo ""
+            echo "Current branch:"
+            git branch --show-current
+
+            echo ""
+            echo "Latest commit:"
+            git log -1 --oneline
+
+            echo ""
+            echo "======================================"
+            echo " CREATING PROMOTION BRANCH"
+            echo "======================================"
+
+            git checkout -b "${PROMOTION_BRANCH}"
+
+            MANIFEST_FILE="${OVERLAY_PATH}/kustomization.yaml"
+
+            echo ""
+            echo "Manifest file:"
+            echo "${MANIFEST_FILE}"
+
+            if [ ! -f "${MANIFEST_FILE}" ]; then
+              echo ""
+              echo "ERROR: Manifest file does not exist."
+              echo "${MANIFEST_FILE}"
+              exit 1
+            fi
+
+            echo ""
+            echo "Current manifest:"
+            cat "${MANIFEST_FILE}"
+
+            CURRENT_TAG=$(
+              grep "newTag:" "${MANIFEST_FILE}" \
+              | head -1 \
+              | sed 's/.*newTag:[[:space:]]*//' \
+              | tr -d '"'
+            )
+
+            echo ""
+            echo "Current Image Tag : ${CURRENT_TAG}"
+            echo "Requested Tag     : ${IMAGE_TAG}"
+
+            if [ "${CURRENT_TAG}" = "${IMAGE_TAG}" ]; then
+              echo ""
+              echo "ERROR: Requested version ${IMAGE_TAG} is already present."
+              echo "Nothing needs to be promoted."
+              exit 1
+            fi
+
+            echo ""
+            echo "======================================"
+            echo " UPDATING MANIFEST"
+            echo "======================================"
+
+            sed -i \
+              "s/newTag: .*/newTag: \"${IMAGE_TAG}\"/" \
+              "${MANIFEST_FILE}"
+
+            echo ""
+            echo "Updated manifest:"
+            cat "${MANIFEST_FILE}"
+
+            echo ""
+            echo "Git diff:"
+            git diff -- "${MANIFEST_FILE}"
+
+            if git diff --quiet -- "${MANIFEST_FILE}"; then
+              echo ""
+              echo "ERROR: Manifest was not changed."
+              exit 1
+            fi
+
+            echo ""
+            echo "======================================"
+            echo " CREATING GIT COMMIT"
+            echo "======================================"
+
+            git config user.name "Argo Workflows"
+            git config user.email "argo-workflows@practice.local"
+
+            git add "${MANIFEST_FILE}"
+
+            git commit \
+              -m "Promote ${APPLICATION} ${IMAGE_TAG} to ${ENVIRONMENT}"
+
+            echo ""
+            echo "======================================"
+            echo " PUSHING PROMOTION BRANCH"
+            echo "======================================"
+
+            git push \
+              -u origin \
+              "${PROMOTION_BRANCH}"
+
+            echo ""
+            echo "Promotion branch pushed successfully:"
+            echo "${PROMOTION_BRANCH}"
+
+            echo ""
+            echo "======================================"
+            echo " CREATING GITHUB PULL REQUEST"
+            echo "======================================"
+
+            PR_TITLE="Promote ${APPLICATION} ${IMAGE_TAG} to ${ENVIRONMENT}"
+
+            PR_BODY=$(printf '%s\n' \
+              "Automated promotion created by Argo Workflows." \
+              "" \
+              "Application: ${APPLICATION}" \
+              "Environment: ${ENVIRONMENT}" \
+              "Image Tag: ${IMAGE_TAG}" \
+              "Source Branch: ${PROMOTION_BRANCH}" \
+              "Target Branch: ${RELEASE_BRANCH}" \
+              "Overlay Path: ${OVERLAY_PATH}" \
+              "" \
+              "Please review the manifest change before merging.")
+
+            echo "PR Title : ${PR_TITLE}"
+            echo "Source   : ${PROMOTION_BRANCH}"
+            echo "Target   : ${RELEASE_BRANCH}"
+
+            jq -n \
+              --arg title "${PR_TITLE}" \
+              --arg head "${PROMOTION_BRANCH}" \
+              --arg base "${RELEASE_BRANCH}" \
+              --arg body "${PR_BODY}" \
+              '{
+                title: $title,
+                head: $head,
+                base: $base,
+                body: $body
+              }' > /tmp/pr-request.json
+
+            HTTP_CODE=$(
+              curl -sS \
+                -o /tmp/pr-response.json \
+                -w "%{http_code}" \
+                -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                -H "Content-Type: application/json" \
+                "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls" \
+                -d @/tmp/pr-request.json
+            )
+
+            echo ""
+            echo "GitHub API HTTP status: ${HTTP_CODE}"
+
+            if [ "${HTTP_CODE}" != "201" ]; then
+              echo ""
+              echo "ERROR: Pull Request creation failed."
+              echo ""
+              echo "GitHub response:"
+              cat /tmp/pr-response.json
+              exit 1
+            fi
+
+            PR_NUMBER=$(jq -r '.number' /tmp/pr-response.json)
+            PR_URL=$(jq -r '.html_url' /tmp/pr-response.json)
+
+            echo ""
+            echo "======================================"
+            echo " PROMOTION COMPLETED SUCCESSFULLY"
+            echo "======================================"
+
+            echo ""
+            echo "Application       : ${APPLICATION}"
+            echo "Environment       : ${ENVIRONMENT}"
+            echo "Image Tag         : ${IMAGE_TAG}"
+            echo "Promotion Branch  : ${PROMOTION_BRANCH}"
+            echo "Target Branch     : ${RELEASE_BRANCH}"
+            echo "PR Number         : ${PR_NUMBER}"
+            echo "PR URL            : ${PR_URL}"
+
+            echo ""
+            echo "IMPORTANT:"
+            echo "The Pull Request has NOT been merged."
+            echo "Manual review/approval is required."
+            echo ""
+            echo "Argo Workflow will NOT approve or merge the PR."
+            echo ""
+            echo "${RELEASE_BRANCH} has NOT changed yet."
+            echo "Argo CD should deploy only after this PR is merged."

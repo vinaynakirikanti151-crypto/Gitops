@@ -20,7 +20,7 @@ spec:
         value: uat
 
       - name: imageTag
-        value: "1.29"
+        value: "1.30"
 
       - name: releaseBranch
         value: release-uat
